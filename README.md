@@ -22,7 +22,7 @@ pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Common deps
-pip install numpy pillow tqdm opencv-python
+pip install numpy pandas pillow tqdm opencv-python
 pip install matplotlib
 
 # Jupyter kernel (optional)
