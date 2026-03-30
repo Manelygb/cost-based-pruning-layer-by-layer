@@ -445,10 +445,18 @@ def run_pruning(args) -> None:
         int(args.batch_size),
         (device.type == "cuda"),
         float(args.scale),
+        dir_img=dir_img,
+        dir_mask=dir_mask,
+        # --- val args for best-checkpoint saving ---
+        valset=val_ids,
+        dir_img_val=dir_img,   # split-based repo: val IDs live in the same dir as train
+        dir_mask_val=dir_mask,
+        eval_fn=eval_net,
     )
     log.info(f"Saved finetuned weights: {save_finetuned}")
 
     # Eval finetuned
+    # Note: net already holds the best weights (loaded inside finetune())
     log.info("Evaluating FINETUNED model...")
     val_gen_eval = get_imgs_and_masks(val_ids, dir_img, dir_mask, args.scale)
     finetuned_dice = eval_net(net, val_gen_eval, len(val_ids), (device.type == "cuda"), args.batch_size)

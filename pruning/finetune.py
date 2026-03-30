@@ -48,12 +48,20 @@ def finetune(
     scale: float = 0.5,
     dir_img: str | None = None,
     dir_mask: str | None = None,
+    # --- val args (optional) ---
+    valset=None,
+    dir_img_val: str | None = None,
+    dir_mask_val: str | None = None,
+    eval_fn=None,
 ) -> None:
     """Fine-tune on Carvana-style dataset generators.
 
     Notes:
     - Keeps original CE training logic: logits [B,2,H,W] + targets [B,H,W] long.
     - If dir_img/dir_mask are not provided, falls back to legacy resolution.
+    - If valset + dir_img_val + dir_mask_val + eval_fn are all provided,
+      val Dice is computed after every epoch and the best checkpoint is saved.
+      Otherwise behaviour is identical to the original (save last epoch).
     """
     net.train()
     loss_meter = AverageMeter()
@@ -65,6 +73,14 @@ def finetune(
 
     log.info(f"[finetune] Using dir_img={dir_img} dir_mask={dir_mask}")
 
+    use_val = (valset is not None and dir_img_val is not None
+               and dir_mask_val is not None and eval_fn is not None)
+
+    if use_val:
+        log.info(f"[finetune] Val-based best-checkpoint saving ENABLED ({len(valset)} val samples)")
+    else:
+        log.info("[finetune] Val args not provided — will save last-epoch checkpoint (original behaviour)")
+
     # If epochs is None -> run "iters" mini-batches total (1 epoch loop wrapper kept).
     if epochs is None:
         epochs = 1
@@ -73,7 +89,13 @@ def finetune(
 
     use_cuda = bool(gpu and torch.cuda.is_available())
 
+    best_dice = -1.0
+    best_path = path + ".best.pth"
+
     for e in range(int(epochs)):
+        net.train()
+        loss_meter = AverageMeter()
+
         train = get_imgs_and_masks(trainset, dir_img, dir_mask, scale)
 
         with tqdm(total=len(trainset)) as progress_bar:
@@ -121,7 +143,36 @@ def finetune(
                 if iters and (i + 1) >= int(iters):
                     break
 
+        log.info(f"Epoch {e + 1} finished | avg train loss: {loss_meter.avg:.6f}")
+
+        if use_val:
+            _dir_img_val = _ensure_trailing_sep(dir_img_val)
+            _dir_mask_val = _ensure_trailing_sep(dir_mask_val)
+            val_gen = get_imgs_and_masks(valset, _dir_img_val, _dir_mask_val, scale)
+            val_dice = eval_fn(net, val_gen, len(valset), gpu, batch_size)
+            net.train()  # restore train mode after eval
+
+            log.info(f"Epoch {e +1 } | val Dice: {val_dice:.6f} ")
+
+            if val_dice > best_dice:
+                best_dice = val_dice
+                torch.save(net.state_dict(), best_path)
+                log.info(f" New best! Saved checkpoint (dice={best_dice:.6f})")
+
     log.info("Finished finetuning")
     log.info(f"Finetuned loss: {loss_meter.avg}")
-    torch.save(net.state_dict(), path)
-    log.info(f"Saving finetuned to {path}...")
+
+    if use_val:
+        if osp.exists(best_path):
+            os.replace(best_path, path)
+            log.info(f"Best val Dice={best_dice:.6f} — saved best checkpoint to {path}")
+        else:
+            torch.save(net.state_dict(), path)
+            log.info(f"Warning: best checkpoint file missing; saved last epoch to {path}")
+
+        state = torch.load(path, map_location="cuda" if use_cuda else "cpu", weights_only=True)
+        net.load_state_dict(state)
+        log.info("Loaded best weights back into model")
+    else:
+        torch.save(net.state_dict(), path)
+        log.info(f"Saving finetuned to {path}...")
