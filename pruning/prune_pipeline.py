@@ -44,6 +44,7 @@ from .pruners.taylor_pruning import set_model_for_taylor
 from .pruners.custom_sequential_pruning import compute_targets_from_pct
 from .pruners.pruning_budgets import resolve_budget_and_requested
 from .pruners.friendly_budget_pruner import FriendlyBudgetPruner
+from .pruners.l2_layerwise_pruner import L2LayerwisePruner
 
 
 def _select_device(device_str: str) -> torch.device:
@@ -73,13 +74,17 @@ def run_pruning(args) -> None:
     device = _select_device(args.device)
     seed_all(int(args.seed), use_cuda=(device.type == "cuda"))
 
+    # Pruning method
+    pruning_method = str(getattr(args, "pruning_method", "taylor")).lower().strip()
+    assert pruning_method in ("taylor", "l2"), f"Unknown pruning_method: {pruning_method}"
+
     # Resolve scope + budgets
     prune_down_total = None if int(args.prune_down_total) < 0 else int(args.prune_down_total)
     scope_norm = str(args.scope).lower().strip()
 
     if scope_norm == "custom_seq":
         budget = None
-        requested_prune_user = int(args.prune_channels)  # total target for logging; actual applied is staged
+        requested_prune_user = int(args.prune_channels)
         scope_desc = "CUSTOM_SEQ (total + pct, sequential)"
     else:
         budget, requested_prune_user, scope_desc = resolve_budget_and_requested(
@@ -102,7 +107,7 @@ def run_pruning(args) -> None:
     save_dir = get_save_dir(save_path, runname, training=False)
     log = get_logger(save_dir, runname)
 
-    # Effective requested prune (logging only; enforcement happens in pruner)
+    # Effective requested prune (logging only)
     requested_prune_effective = int(requested_prune_user)
     if friendly_enabled and friendly_multiple > 1:
         if friendly_round == "down":
@@ -115,6 +120,7 @@ def run_pruning(args) -> None:
         "save_dir": save_dir,
         "device": device.type,
         "data_root": data_root,
+        "pruning_method": pruning_method,
         "scale": float(args.scale),
         "batch_size": int(args.batch_size),
         "taylor_batches": int(args.taylor_batches),
@@ -214,21 +220,35 @@ def run_pruning(args) -> None:
     if max_cand <= 0:
         max_cand = None
 
-    pruner = FriendlyBudgetPruner(
-        net,
-        float(args.flops_reg),
+    common_pruner_kwargs = dict(
         scope=scope_norm,
         include_inc=bool(int(args.include_inc)),
         budget=budget,
-        rank_transform=str(args.rank_transform),
-        rank_overfetch=int(args.rank_overfetch),
-        max_candidates_per_layer=max_cand,
         min_keep_ch=int(args.min_keep_ch),
         min_keep_ratio=float(args.min_keep_ratio),
         friendly_enabled=friendly_enabled,
         friendly_multiple=int(friendly_multiple),
         friendly_round=friendly_round,
     )
+
+    if pruning_method == "l2":
+        log.info("Pruning method: L2 LAYERWISE (weight-based, no data passes required)")
+        pruner = L2LayerwisePruner(
+            net,
+            flops_reg=0.0,
+            distribution=str(getattr(args, "l2_distribution", "proportional")),
+            **common_pruner_kwargs,
+        )
+    else:
+        log.info("Pruning method: TAYLOR (gradient-based)")
+        pruner = FriendlyBudgetPruner(
+            net,
+            float(args.flops_reg),
+            rank_transform=str(args.rank_transform),
+            rank_overfetch=int(args.rank_overfetch),
+            max_candidates_per_layer=max_cand,
+            **common_pruner_kwargs,
+        )
 
     criterion = nn.CrossEntropyLoss()
     taylor_shuffle = bool(int(args.taylor_shuffle))
@@ -237,8 +257,14 @@ def run_pruning(args) -> None:
     baseline_flops_sum = None
     input_hw: Optional[Tuple[int, int]] = None
 
+    # ----------------------------
+    # Taylor batch loop (Taylor only)
+    # ----------------------------
     def _run_taylor_batches(stage_label: str) -> None:
         nonlocal baseline_flops_named, baseline_flops_sum, input_hw
+
+        if pruning_method != "taylor":
+            return
 
         pruner.clear_cache()
         pruner.clear_rank()
@@ -286,6 +312,24 @@ def run_pruning(args) -> None:
                     log.info(f"Finished Taylor criterion computation ({stage_label})")
                     break
 
+    # For L2: infer input_hw and baseline FLOPs from a dummy forward (no data passes)
+    def _infer_input_hw_for_l2() -> None:
+        nonlocal input_hw, baseline_flops_named, baseline_flops_sum
+        if input_hw is not None:
+            return
+        gen = get_imgs_and_masks(train_ids[:1], dir_img, dir_mask, args.scale)
+        for img, _ in gen:
+            h, w = int(img.shape[1]), int(img.shape[2])
+            input_hw = (h, w)
+            break
+        dummy = torch.zeros((1, 3, input_hw[0], input_hw[1]), device=device, dtype=torch.float32)
+        named = conv_flops_named_no_grad(net, dummy)
+        named_no_outc = [(n, f) for (n, f) in named if n != "outc.conv"]
+        baseline_flops_named = named_no_outc
+        baseline_flops_sum = int(sum(f for _, f in named_no_outc))
+        if int(args.print_flops) == 1:
+            print_flops_per_conv(log, "FLOPs before pruning (per conv):", baseline_flops_named)
+
     # ----------------------------
     # Pruning stage(s)
     # ----------------------------
@@ -307,6 +351,9 @@ def run_pruning(args) -> None:
             f"encoder={target_enc} | bottleneck={target_bot} | decoder={target_dec}"
         )
 
+        if pruning_method == "l2":
+            _infer_input_hw_for_l2()
+
         base_dep = take_dep_snapshot(net)
 
         def _stage(stage_scope: str, stage_target: int, stage_label: str) -> int:
@@ -317,7 +364,10 @@ def run_pruning(args) -> None:
             pruner.scope = stage_scope
             pruner.budget = None
 
-            _run_taylor_batches(stage_label)
+            _run_taylor_batches(stage_label)  # no-op for L2
+
+            if pruning_method == "l2":
+                pruner.compute_l2_scores()
 
             pruner.log_rank_stats(log)
             _ = pruner.preview_selection(int(stage_target))
@@ -364,8 +414,15 @@ def run_pruning(args) -> None:
         log.info(f"Custom_seq pruning complete: total_applied={applied_total}")
 
     else:
-        # Single pass (original behavior)
-        _run_taylor_batches("single_pass")
+        # ----------------------------
+        # Single pass
+        # ----------------------------
+        if pruning_method == "l2":
+            _infer_input_hw_for_l2()
+            log.info("Computing L2 scores from model weights...")
+            pruner.compute_l2_scores()
+        else:
+            _run_taylor_batches("single_pass")
 
         if input_hw is None or baseline_flops_sum is None or baseline_flops_named is None:
             raise RuntimeError("Could not infer input HW / baseline FLOPs (train set empty?)")
@@ -388,7 +445,7 @@ def run_pruning(args) -> None:
         log.info(f"Pruning complete: requested removal={applied_total}")
 
     # ----------------------------
-    # Save & rebuild pruned architecture (same as original)
+    # Save & rebuild pruned architecture
     # ----------------------------
     save_pruned_pth = osp.join(save_dir, "Pruned.pth")
     save_pruned_txt = osp.join(save_dir, "pruned_channels.txt")
@@ -449,7 +506,7 @@ def run_pruning(args) -> None:
         dir_mask=dir_mask,
         # --- val args for best-checkpoint saving ---
         valset=val_ids,
-        dir_img_val=dir_img,   # split-based repo: val IDs live in the same dir as train
+        dir_img_val=dir_img,
         dir_mask_val=dir_mask,
         eval_fn=eval_net,
     )

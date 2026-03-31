@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bench_channels_last", type=int, default=0, help="1 use channels_last for benchmark")
     p.add_argument("--bench_threads", type=int, default=0, help="CPU threads for benchmark (0 = default)")
 
+    #l2 layer by layer
+    p.add_argument("--pruning_method", default="taylor", choices=["taylor", "l2"])
+    p.add_argument("--l2_distribution", default="proportional", choices=["proportional", "uniform"])
+
     # Repro
     p.add_argument("--seed", type=int, default=42, help="random seed")
 
