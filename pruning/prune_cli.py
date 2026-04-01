@@ -8,7 +8,7 @@ def parse_args() -> argparse.Namespace:
 
     # Identity / paths
     p.add_argument("-n", "--name", default="final", help="run name (folder name)")
-    p.add_argument("--save_root", default="save_pruning_logs", help="root output folder")
+    p.add_argument("--save_root", default="save_pruning_logs_layer_by_layer_l2", help="root output folder")
     p.add_argument("--data_root", default="data", help="folder containing train/ and train_masks/")
     p.add_argument("--splitfile", default="pruning/data/trainval.json", help="train/val split json path")
     p.add_argument("-l", "--load", default="weights/unet_carvana_scale0.5_epoch2.pth", help="checkpoint path (state_dict)")
