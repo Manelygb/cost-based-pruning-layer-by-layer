@@ -1,0 +1,20 @@
+name: unet
+channels:
+  - defaults
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - --upgrade pip
+      - torch
+      - torchvision
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - numpy
+      - pandas
+      - pillow
+      - tqdm
+      - opencv-python
+      - matplotlib

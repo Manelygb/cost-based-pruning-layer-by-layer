@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     # Finetuning
     p.add_argument("-r", "--lr", type=float, default=0.001, help="finetune lr")
     p.add_argument("-i", "--iters", type=int, default=1500, help="finetune iterations")
-    p.add_argument("-e", "--epochs", type=int, default=2, help="compat: epochs, 0 uses iters only")
+    p.add_argument("-e", "--epochs", type=int, default=5, help="compat: epochs, 0 uses iters only")
 
     # Baseline eval
     p.add_argument("--eval_baseline", type=int, default=0, help="1 eval baseline, 0 skip")
