@@ -17,5 +17,5 @@ __pycache__/
 .idea/
 pruning/data/
 
-
+results*/
 .github/workflows/
