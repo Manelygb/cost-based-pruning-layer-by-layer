@@ -1,6 +1,6 @@
 # unet_pruning — Pruning + Finetuning pipeline for Carvana U-Net
 
-This repository contains a refactored pruning pipeline (Taylor criterion → channel selection → structured channel pruning → finetune → evaluation) for a U-Net trained on the Carvana segmentation dataset.
+This repository contains a refactored pruning layer by layer pipeline using l2 norm criterion for a U-Net trained on the Carvana segmentation dataset.
 
 Primary entry point: **`prune.py`**.
 
