@@ -45,6 +45,11 @@ from .pruners.custom_sequential_pruning import compute_targets_from_pct
 from .pruners.pruning_budgets import resolve_budget_and_requested
 from .pruners.friendly_budget_pruner import FriendlyBudgetPruner
 from .pruners.l2_layerwise_pruner import L2LayerwisePruner
+from .pruners.bn_gamma_layerwise_pruner import BNGammaLayerwisePruner
+
+# Valid pruning methods
+_WEIGHT_BASED_METHODS = ("l2", "bn_gamma")  # no data passes needed
+_ALL_METHODS = ("taylor",) + _WEIGHT_BASED_METHODS
 
 
 def _select_device(device_str: str) -> torch.device:
@@ -76,7 +81,8 @@ def run_pruning(args) -> None:
 
     # Pruning method
     pruning_method = str(getattr(args, "pruning_method", "taylor")).lower().strip()
-    assert pruning_method in ("taylor", "l2"), f"Unknown pruning_method: {pruning_method}"
+    assert pruning_method in _ALL_METHODS, f"Unknown pruning_method: {pruning_method}. Choose from {_ALL_METHODS}"
+    is_weight_based = pruning_method in _WEIGHT_BASED_METHODS
 
     # Resolve scope + budgets
     prune_down_total = None if int(args.prune_down_total) < 0 else int(args.prune_down_total)
@@ -239,6 +245,14 @@ def run_pruning(args) -> None:
             distribution=str(getattr(args, "l2_distribution", "proportional")),
             **common_pruner_kwargs,
         )
+    elif pruning_method == "bn_gamma":
+        log.info("Pruning method: BN GAMMA LAYERWISE (|γ|-based, no data passes required)")
+        pruner = BNGammaLayerwisePruner(
+            net,
+            flops_reg=0.0,
+            distribution=str(getattr(args, "l2_distribution", "proportional")),  # reuse same arg
+            **common_pruner_kwargs,
+        )
     else:
         log.info("Pruning method: TAYLOR (gradient-based)")
         pruner = FriendlyBudgetPruner(
@@ -312,8 +326,8 @@ def run_pruning(args) -> None:
                     log.info(f"Finished Taylor criterion computation ({stage_label})")
                     break
 
-    # For L2: infer input_hw and baseline FLOPs from a dummy forward (no data passes)
-    def _infer_input_hw_for_l2() -> None:
+    # For weight-based methods: infer input_hw and baseline FLOPs from a dummy forward
+    def _infer_input_hw_for_weight_based() -> None:
         nonlocal input_hw, baseline_flops_named, baseline_flops_sum
         if input_hw is not None:
             return
@@ -329,6 +343,17 @@ def run_pruning(args) -> None:
         baseline_flops_sum = int(sum(f for _, f in named_no_outc))
         if int(args.print_flops) == 1:
             print_flops_per_conv(log, "FLOPs before pruning (per conv):", baseline_flops_named)
+
+    def _compute_weight_scores(stage_label: str = "") -> None:
+        """Compute scores for weight-based methods (L2 or BN gamma)."""
+        if pruning_method == "l2":
+            label = f"L2 scores{' (' + stage_label + ')' if stage_label else ''}"
+            log.info(f"Computing {label} from model weights...")
+            pruner.compute_l2_scores()
+        elif pruning_method == "bn_gamma":
+            label = f"BN gamma scores{' (' + stage_label + ')' if stage_label else ''}"
+            log.info(f"Computing {label} from BN parameters...")
+            pruner.compute_gamma_scores()
 
     # ----------------------------
     # Pruning stage(s)
@@ -351,8 +376,8 @@ def run_pruning(args) -> None:
             f"encoder={target_enc} | bottleneck={target_bot} | decoder={target_dec}"
         )
 
-        if pruning_method == "l2":
-            _infer_input_hw_for_l2()
+        if is_weight_based:
+            _infer_input_hw_for_weight_based()
 
         base_dep = take_dep_snapshot(net)
 
@@ -364,10 +389,10 @@ def run_pruning(args) -> None:
             pruner.scope = stage_scope
             pruner.budget = None
 
-            _run_taylor_batches(stage_label)  # no-op for L2
+            _run_taylor_batches(stage_label)  # no-op for weight-based
 
-            if pruning_method == "l2":
-                pruner.compute_l2_scores()
+            if is_weight_based:
+                _compute_weight_scores(stage_label)
 
             pruner.log_rank_stats(log)
             _ = pruner.preview_selection(int(stage_target))
@@ -384,13 +409,11 @@ def run_pruning(args) -> None:
             )
             return int(to_apply)
 
-        # Stage 1 — encoder
         applied_total += _stage("encoder", int(target_enc), "encoder")
 
         dep = dep_pruned_counts(base_dep, take_dep_snapshot(net))
         bot_dep = int(dep.get("bottleneck_dep", 0))
 
-        # Stage 2 — bottleneck
         remaining_bot = max(0, int(target_bot) - int(bot_dep))
         if remaining_bot <= 0:
             log.info("Stage bottleneck: skipped (target satisfied by dependencies)")
@@ -400,7 +423,6 @@ def run_pruning(args) -> None:
         dep = dep_pruned_counts(base_dep, take_dep_snapshot(net))
         dec_dep = int(dep.get("decoder_dep", 0))
 
-        # Stage 3 — decoder
         remaining_dec = max(0, int(target_dec) - int(dec_dep))
         if remaining_dec <= 0:
             log.info("Stage decoder: skipped (target satisfied by dependencies)")
@@ -417,10 +439,9 @@ def run_pruning(args) -> None:
         # ----------------------------
         # Single pass
         # ----------------------------
-        if pruning_method == "l2":
-            _infer_input_hw_for_l2()
-            log.info("Computing L2 scores from model weights...")
-            pruner.compute_l2_scores()
+        if is_weight_based:
+            _infer_input_hw_for_weight_based()
+            _compute_weight_scores()
         else:
             _run_taylor_batches("single_pass")
 
@@ -504,7 +525,6 @@ def run_pruning(args) -> None:
         float(args.scale),
         dir_img=dir_img,
         dir_mask=dir_mask,
-        # --- val args for best-checkpoint saving ---
         valset=val_ids,
         dir_img_val=dir_img,
         dir_mask_val=dir_mask,
@@ -512,7 +532,6 @@ def run_pruning(args) -> None:
     )
     log.info(f"Saved finetuned weights: {save_finetuned}")
 
-    # Eval finetuned
     # Note: net already holds the best weights (loaded inside finetune())
     log.info("Evaluating FINETUNED model...")
     val_gen_eval = get_imgs_and_masks(val_ids, dir_img, dir_mask, args.scale)
