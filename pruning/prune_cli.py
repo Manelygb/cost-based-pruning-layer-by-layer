@@ -8,7 +8,7 @@ def parse_args() -> argparse.Namespace:
 
     # Identity / paths
     p.add_argument("-n", "--name", default="final", help="run name (folder name)")
-    p.add_argument("--save_root", default="save_pruning_logs_layer_by_layer_l2", help="root output folder")
+    p.add_argument("--save_root", default="save_pruning_logs_layer_by_layer_bn_gamma", help="root output folder")
     p.add_argument("--data_root", default="data", help="folder containing train/ and train_masks/")
     p.add_argument("--splitfile", default="pruning/data/trainval.json", help="train/val split json path")
     p.add_argument("-l", "--load", default="weights/unet_carvana_scale0.5_epoch2.pth", help="checkpoint path (state_dict)")
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     # Finetuning
     p.add_argument("-r", "--lr", type=float, default=0.001, help="finetune lr")
     p.add_argument("-i", "--iters", type=int, default=1500, help="finetune iterations")
-    p.add_argument("-e", "--epochs", type=int, default=5, help="compat: epochs, 0 uses iters only")
+    p.add_argument("-e", "--epochs", type=int, default=2, help="compat: epochs, 0 uses iters only")
 
     # Baseline eval
     p.add_argument("--eval_baseline", type=int, default=0, help="1 eval baseline, 0 skip")
@@ -84,9 +84,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bench_channels_last", type=int, default=0, help="1 use channels_last for benchmark")
     p.add_argument("--bench_threads", type=int, default=0, help="CPU threads for benchmark (0 = default)")
 
-    #l2 layer by layer
-    p.add_argument("--pruning_method", default="taylor", choices=["taylor", "l2"])
+    #layer by layer
     p.add_argument("--l2_distribution", default="proportional", choices=["proportional", "uniform"])
+    p.add_argument("--pruning_method", default="taylor", choices=["taylor", "l2", "bn_gamma"])
 
     # Repro
     p.add_argument("--seed", type=int, default=42, help="random seed")
