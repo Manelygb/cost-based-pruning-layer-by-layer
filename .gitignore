@@ -16,6 +16,10 @@ __pycache__/
 .ipynb_checkpoints/
 .idea/
 pruning/data/
-
+*data*/
 results*/
 .github/workflows/
+archive.zip
+
+*.zip
+
