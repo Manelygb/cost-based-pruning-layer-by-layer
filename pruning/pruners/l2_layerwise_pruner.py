@@ -12,39 +12,82 @@ from common.measurements import ceil_to_multiple, floor_to_multiple
 from .base_pruner import Pruner
 
 
+# ---------------------------------------------------------------------------
+# Pruning budget table — layer_name → cost_share% (from profiling notebook).
+# Layers absent from this table receive 0 allocation (skipped).
+# outc.conv is never pruned regardless.
+#
+# These cost_share values drive the same idea as the old per-part split
+# (encoder≈24 % / bottleneck≈7 % / decoder≈69 %) but at layer granularity:
+# a layer's share of the total prune budget == its share of total FLOPs.
+# ---------------------------------------------------------------------------
+_COST_SHARE_TABLE: Dict[str, float] = {
+    # ── decoder (rank 1-4, cost_share 8.847% each × 4 = 35.4%) ──────────────
+    "up4.conv.double_conv.0":              8.847247,
+    "up1.conv.double_conv.0":             8.847247,
+    "up2.conv.double_conv.0":             8.847247,
+    "up3.conv.double_conv.0":             8.847247,
+    # ── encoder + bottleneck + decoder (rank 5-13, 4.424% each × 9 = 39.8%) ─
+    "inc.double_conv.3":                  4.423623,
+    "down2.maxpool_conv.1.double_conv.3": 4.423623,
+    "down1.maxpool_conv.1.double_conv.3": 4.423623,
+    "up4.conv.double_conv.3":             4.423623,
+    "up2.conv.double_conv.3":             4.423623,
+    "down3.maxpool_conv.1.double_conv.3": 4.423623,
+    "down4.maxpool_conv.1.double_conv.3": 4.423623,
+    "up1.conv.double_conv.3":             4.423623,
+    "up3.conv.double_conv.3":             4.423623,
+    # ── decoder ConvTranspose2d (rank 14-17, 3.932% each × 4 = 15.7%) ───────
+    "up1.up":                             3.932110,
+    "up2.up":                             3.932110,
+    "up4.up":                             3.932110,
+    "up3.up":                             3.932110,
+    # ── encoder + bottleneck (rank 18-21, 2.212% each × 4 = 8.8%) ───────────
+    "down1.maxpool_conv.1.double_conv.0": 2.211812,
+    "down2.maxpool_conv.1.double_conv.0": 2.211812,
+    "down4.maxpool_conv.1.double_conv.0": 2.211812,
+    "down3.maxpool_conv.1.double_conv.0": 2.211812,
+    # ── inc input conv (rank 22, 0.207%) ────────────────────────────────────
+    "inc.double_conv.0":                  0.207357,
+    # outc.conv intentionally absent → never pruned
+}
+
+
 class L2LayerwisePruner(Pruner):
     """Layer-by-layer structured pruning using L2 norm criterion.
 
-    Instead of Taylor criterion (which needs forward+backward passes and gradient
-    accumulation), this pruner scores each output channel by the L2 norm of its
-    filter weights: score(c) = ||W_c||_2.
+    Budget distribution
+    -------------------
+    Each eligible layer receives a share of the total prune budget that is
+    proportional to its ``cost_share%`` from ``_COST_SHARE_TABLE``.  This
+    mirrors the old per-part split (encoder / bottleneck / decoder) but at
+    layer granularity — layers that account for more FLOPs get a larger slice
+    of the pruning budget.
 
-    Channels with the smallest L2 norm are considered least important and are
-    pruned first, layer by layer.
+    Layers absent from ``_COST_SHARE_TABLE`` receive **zero** allocation and
+    are skipped.  ``outc.conv`` is never pruned regardless.
 
-    Layer-by-layer means each layer gets its own per-layer budget derived from
-    the global/scope budget proportionally (by current out_channels share), rather
-    than ranking all channels globally and letting the lowest-scoring ones win
-    regardless of which layer they come from.
-
-    Friendly rounding is applied ONCE to the total budget before distribution,
-    not per-layer (which causes either inflation or starvation of small layers).
+    Friendly rounding is applied **once** to the total budget before
+    distribution, not per-layer.
 
     Args:
         net: the UNet model.
         flops_reg: kept for interface compatibility, not used in L2 scoring.
-        scope: same as FriendlyBudgetPruner ("global", "encoder", "bottleneck",
-               "decoder", "custom", "pooled_down", "custom_seq").
-        include_inc: whether inc.* counts as encoder.
+        scope: same as FriendlyBudgetPruner
+               (``"global"``, ``"encoder"``, ``"bottleneck"``, ``"decoder"``,
+               ``"custom"``, ``"pooled_down"``, ``"custom_seq"``).
+               Scope still gates *which* layers are candidates; cost-share
+               weights determine the split *among* candidates.
+        include_inc: whether ``inc.*`` counts as encoder.
         budget: GroupBudget for custom/pooled_down scopes.
         min_keep_ch: minimum output channels to keep per conv.
         min_keep_ratio: minimum keep ratio per conv (0 disables).
         friendly_enabled: snap final total to a multiple of friendly_multiple.
         friendly_multiple: the channel multiple to snap to.
-        friendly_round: "up" or "down" for the total snapping.
-        distribution: how to distribute the budget across layers.
-            "proportional" (default) — proportional to each layer's out_channels.
-            "uniform"                — equal share per eligible layer.
+        friendly_round: ``"up"`` or ``"down"`` for the total snapping.
+        distribution: ``"cost_share"`` (default, table-driven) |
+                      ``"proportional"`` (by out_channels, legacy) |
+                      ``"uniform"`` (equal share per layer, legacy).
     """
 
     def __init__(
@@ -59,7 +102,7 @@ class L2LayerwisePruner(Pruner):
         friendly_enabled: bool = True,
         friendly_multiple: int = 8,
         friendly_round: str = "up",
-        distribution: str = "proportional",
+        distribution: str = "cost_share",
         **kwargs,
     ):
         super().__init__(net, flops_reg, min_keep_ch=min_keep_ch, min_keep_ratio=min_keep_ratio)
@@ -184,14 +227,32 @@ class L2LayerwisePruner(Pruner):
         return max(0, out_ch - min_keep)
 
     # ------------------------------------------------------------------
-    # Budget distribution — raw proportional/uniform, NO per-layer rounding
+    # Cost-share weight lookup
+    # ------------------------------------------------------------------
+    def _cost_share_weight(self, layer_idx: int) -> float:
+        """Return the cost_share% for this layer, or 0.0 if not in the table."""
+        name = self.conv_names[layer_idx] if layer_idx < len(self.conv_names) else ""
+        return _COST_SHARE_TABLE.get(name, 0.0)
+
+    # ------------------------------------------------------------------
+    # Budget distribution
     # ------------------------------------------------------------------
     def _distribute_budget(self, layers: List[int], total_budget: int) -> Dict[int, int]:
-        """Distribute total_budget across layers without any per-layer rounding.
+        """Distribute total_budget across layers.
 
-        Friendly rounding must already have been applied to total_budget before
-        calling this. Per-layer allocations are plain integers, capped at each
-        layer's hard max.
+        ``distribution == "cost_share"`` (default):
+            Each layer's raw allocation = total_budget × (layer_cost_share /
+            sum_of_cost_shares_for_eligible_layers).  Layers not in
+            _COST_SHARE_TABLE receive weight 0 and are skipped entirely.
+
+        ``distribution == "proportional"`` (legacy):
+            Proportional to each layer's current out_channels.
+
+        ``distribution == "uniform"`` (legacy):
+            Equal share per eligible layer.
+
+        Friendly rounding must already have been applied to total_budget.
+        Per-layer allocations are plain integers, capped at each layer's hard max.
         """
         if not layers or total_budget <= 0:
             return {}
@@ -203,32 +264,71 @@ class L2LayerwisePruner(Pruner):
 
         effective_budget = min(int(total_budget), int(cap_total))
 
+        # ── cost_share distribution ───────────────────────────────────────────
+        if self.distribution == "cost_share":
+            weights = {li: self._cost_share_weight(li) for li in layers}
+            total_weight = sum(weights.values())
+
+            if total_weight <= 0.0:
+                # No layer in scope has a cost_share entry → fall back to
+                # proportional so the run doesn't silently prune nothing.
+                import warnings
+                warnings.warn(
+                    "L2LayerwisePruner: none of the eligible layers have a "
+                    "cost_share entry in _COST_SHARE_TABLE; falling back to "
+                    "proportional distribution.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                self.distribution = "proportional"
+            else:
+                raw: Dict[int, int] = {}
+                allocated = 0
+                # Sort for determinism; handle the last layer's remainder
+                eligible_with_weight = [(li, weights[li]) for li in sorted(layers) if weights[li] > 0.0]
+                skipped              = [li for li in sorted(layers) if weights[li] <= 0.0]
+
+                for i, (li, w) in enumerate(eligible_with_weight):
+                    if i == len(eligible_with_weight) - 1:
+                        raw[li] = effective_budget - allocated
+                    else:
+                        share = int(round(effective_budget * w / total_weight))
+                        raw[li] = share
+                        allocated += share
+
+                for li in skipped:
+                    raw[li] = 0
+
+                result = {}
+                for li in layers:
+                    alloc = min(int(raw.get(li, 0)), int(layer_max[li]))
+                    result[li] = max(alloc, 0)
+                return result
+
+        # ── uniform distribution (legacy) ────────────────────────────────────
         if self.distribution == "uniform":
-            base = effective_budget // len(layers)
+            base      = effective_budget // len(layers)
             remainder = effective_budget - base * len(layers)
             raw = {li: base + (1 if i < remainder else 0) for i, li in enumerate(layers)}
+
+        # ── proportional distribution (legacy) ───────────────────────────────
         else:
-            # proportional by out_channels
-            out_chs = {li: int(self.convs[li].out_channels) for li in layers}
-            total_ch = float(sum(out_chs.values()))
-            raw = {}
-            allocated = 0
-            for i, li in enumerate(layers):
+            out_chs    = {li: int(self.convs[li].out_channels) for li in layers}
+            total_ch   = float(sum(out_chs.values()))
+            raw        = {}
+            allocated  = 0
+            for i, li in enumerate(sorted(layers)):
                 if i == len(layers) - 1:
                     raw[li] = effective_budget - allocated
                 else:
-                    share = int(round(effective_budget * out_chs[li] / total_ch))
+                    share  = int(round(effective_budget * out_chs[li] / total_ch))
                     raw[li] = share
                     allocated += share
 
-        # Cap at layer max only — no rounding
         result = {}
         for li in layers:
-            alloc = int(raw.get(li, 0))
-            alloc = min(alloc, int(layer_max[li]))
-            alloc = max(alloc, 0)
-            result[li] = alloc
-
+            alloc = min(int(raw.get(li, 0)), int(layer_max[li]))
+            result[li] = max(alloc, 0)
         return result
 
     # ------------------------------------------------------------------
@@ -274,19 +374,15 @@ class L2LayerwisePruner(Pruner):
 
         else:
             # global / single-part scopes
-            # Step 1: snap total once
             snapped_total = self._snap_total(int(prune_channels))
-
-            # Step 2: distribute raw (no per-layer rounding)
-            layers = self._eligible_layer_idxs()
+            layers        = self._eligible_layer_idxs()
             layer_budgets = self._distribute_budget(sorted(layers), snapped_total)
 
-            # Step 3: select lowest-L2 channels per layer
             for li, n in layer_budgets.items():
                 chosen += self._select_from_layer(li, n)
 
         # Dedup
-        seen = set()
+        seen  = set()
         dedup: List[Tuple[float, int, int]] = []
         for s, l, c in chosen:
             key = (int(l), int(c))
@@ -295,7 +391,7 @@ class L2LayerwisePruner(Pruner):
             seen.add(key)
             dedup.append((float(s), int(l), int(c)))
 
-        self._last_selected = dedup
+        self._last_selected       = dedup
         self._effective_prune_last = len(dedup)
 
         layer_tensor = torch.tensor([l for (_, l, _) in dedup], dtype=torch.long, device="cpu")
@@ -321,11 +417,12 @@ class L2LayerwisePruner(Pruner):
         log.info("=" * 92)
 
         for li in sorted(self._l2_scores.keys())[:max_layers]:
-            name  = self.conv_names[li] if li < len(self.conv_names) else f"layer{li}"
-            conv  = self.convs[li] if li < len(self.convs) else None
+            name   = self.conv_names[li] if li < len(self.conv_names) else f"layer{li}"
+            conv   = self.convs[li] if li < len(self.convs) else None
             out_ch = int(conv.out_channels) if conv is not None else -1
-            g     = self._group_of_layer(li)
+            g      = self._group_of_layer(li)
             scores = self._l2_scores[li]
+            share  = _COST_SHARE_TABLE.get(name, 0.0)
 
             mn  = float(scores.min().item())
             md  = float(scores.median().item())
@@ -333,20 +430,21 @@ class L2LayerwisePruner(Pruner):
             std = float(scores.std().item()) if scores.numel() > 1 else 0.0
 
             log.info(
-                f"  - {name:40s} | group={g:10s} | out_ch={out_ch:4d} | "
+                f"  - {name:44s} | group={g:10s} | out_ch={out_ch:4d} | "
+                f"cost_share={share:6.3f}% | "
                 f"L2(min/med/max/std)={mn:.4f}/{md:.4f}/{mx:.4f}/{std:.4f}"
             )
         log.info("=" * 92)
 
     def log_selection_distribution(self, log, selected: List[Tuple[float, int, int]]) -> None:
-        by_conv: Dict[str, int]  = {}
+        by_conv:  Dict[str, int] = {}
         by_group: Dict[str, int] = {"encoder": 0, "bottleneck": 0, "decoder": 0, "other": 0}
 
         for _, li, _ in selected:
             name = self.conv_names[li] if li < len(self.conv_names) else f"layer{li}"
-            by_conv[name] = by_conv.get(name, 0) + 1
-            g = self._group_of_layer(li)
-            by_group[g] = by_group.get(g, 0) + 1
+            by_conv[name]  = by_conv.get(name, 0) + 1
+            g              = self._group_of_layer(li)
+            by_group[g]    = by_group.get(g, 0) + 1
 
         log.info("=" * 92)
         log.info("SELECTION DISTRIBUTION")
@@ -356,5 +454,6 @@ class L2LayerwisePruner(Pruner):
         top = sorted(by_conv.items(), key=lambda x: x[1], reverse=True)[:25]
         log.info("Top convs by selected channels:")
         for n, c in top:
-            log.info(f"  - {n:40s}: {c}")
+            cost = _COST_SHARE_TABLE.get(n, 0.0)
+            log.info(f"  - {n:44s}: {c:4d} channels  (cost_share={cost:.3f}%)")
         log.info("=" * 92)

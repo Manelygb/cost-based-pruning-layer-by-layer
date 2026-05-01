@@ -46,9 +46,10 @@ from .pruners.pruning_budgets import resolve_budget_and_requested
 from .pruners.friendly_budget_pruner import FriendlyBudgetPruner
 from .pruners.l2_layerwise_pruner import L2LayerwisePruner
 from .pruners.bn_gamma_layerwise_pruner import BNGammaLayerwisePruner
+from .pruners.fpgm_layerwise_pruner import FPGMLayerwisePruner
 
-# Valid pruning methods
-_WEIGHT_BASED_METHODS = ("l2", "bn_gamma")  # no data passes needed
+# Weight-based methods need no data passes for scoring
+_WEIGHT_BASED_METHODS = ("l2", "bn_gamma", "fpgm")
 _ALL_METHODS = ("taylor",) + _WEIGHT_BASED_METHODS
 
 
@@ -81,7 +82,8 @@ def run_pruning(args) -> None:
 
     # Pruning method
     pruning_method = str(getattr(args, "pruning_method", "taylor")).lower().strip()
-    assert pruning_method in _ALL_METHODS, f"Unknown pruning_method: {pruning_method}. Choose from {_ALL_METHODS}"
+    assert pruning_method in _ALL_METHODS, \
+        f"Unknown pruning_method: {pruning_method}. Choose from {_ALL_METHODS}"
     is_weight_based = pruning_method in _WEIGHT_BASED_METHODS
 
     # Resolve scope + budgets
@@ -237,12 +239,15 @@ def run_pruning(args) -> None:
         friendly_round=friendly_round,
     )
 
+    # distribution arg shared by all layerwise methods
+    layerwise_distribution = str(getattr(args, "l2_distribution", "proportional"))
+
     if pruning_method == "l2":
-        log.info("Pruning method: L2 LAYERWISE (weight-based, no data passes required)")
+        log.info("Pruning method: L2 LAYERWISE (weight norm, no data passes required)")
         pruner = L2LayerwisePruner(
             net,
             flops_reg=0.0,
-            distribution=str(getattr(args, "l2_distribution", "proportional")),
+            distribution=layerwise_distribution,
             **common_pruner_kwargs,
         )
     elif pruning_method == "bn_gamma":
@@ -250,7 +255,17 @@ def run_pruning(args) -> None:
         pruner = BNGammaLayerwisePruner(
             net,
             flops_reg=0.0,
-            distribution=str(getattr(args, "l2_distribution", "proportional")),  # reuse same arg
+            distribution=layerwise_distribution,
+            **common_pruner_kwargs,
+        )
+    elif pruning_method == "fpgm":
+        fpgm_dist_metric = str(getattr(args, "fpgm_dist_metric", "l2"))
+        log.info(f"Pruning method: FPGM LAYERWISE (geometric median, dist={fpgm_dist_metric}, no data passes required)")
+        pruner = FPGMLayerwisePruner(
+            net,
+            flops_reg=0.0,
+            distribution=layerwise_distribution,
+            dist_metric=fpgm_dist_metric,
             **common_pruner_kwargs,
         )
     else:
@@ -326,7 +341,7 @@ def run_pruning(args) -> None:
                     log.info(f"Finished Taylor criterion computation ({stage_label})")
                     break
 
-    # For weight-based methods: infer input_hw and baseline FLOPs from a dummy forward
+    # For weight-based methods: infer input_hw + baseline FLOPs from dummy forward
     def _infer_input_hw_for_weight_based() -> None:
         nonlocal input_hw, baseline_flops_named, baseline_flops_sum
         if input_hw is not None:
@@ -345,15 +360,17 @@ def run_pruning(args) -> None:
             print_flops_per_conv(log, "FLOPs before pruning (per conv):", baseline_flops_named)
 
     def _compute_weight_scores(stage_label: str = "") -> None:
-        """Compute scores for weight-based methods (L2 or BN gamma)."""
+        """Compute scores for the active weight-based method."""
+        suffix = f" ({stage_label})" if stage_label else ""
         if pruning_method == "l2":
-            label = f"L2 scores{' (' + stage_label + ')' if stage_label else ''}"
-            log.info(f"Computing {label} from model weights...")
+            log.info(f"Computing L2 scores{suffix} from model weights...")
             pruner.compute_l2_scores()
         elif pruning_method == "bn_gamma":
-            label = f"BN gamma scores{' (' + stage_label + ')' if stage_label else ''}"
-            log.info(f"Computing {label} from BN parameters...")
+            log.info(f"Computing BN gamma scores{suffix} from BN parameters...")
             pruner.compute_gamma_scores()
+        elif pruning_method == "fpgm":
+            log.info(f"Computing FPGM redundancy scores{suffix} from model weights...")
+            pruner.compute_fpgm_scores()
 
     # ----------------------------
     # Pruning stage(s)
