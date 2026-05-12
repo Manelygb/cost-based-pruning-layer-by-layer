@@ -21,6 +21,7 @@ from .base_pruner import Pruner
 # (encoder≈24 % / bottleneck≈7 % / decoder≈69 %) but at layer granularity:
 # a layer's share of the total prune budget == its share of total FLOPs.
 # ---------------------------------------------------------------------------
+_MIN_COST_SHARE_THRESHOLD: float = 0.0
 _COST_SHARE_TABLE: Dict[str, float] = {
     # ── decoder (rank 1-4, cost_share 8.847% each × 4 = 35.4%) ──────────────
     "up4.conv.double_conv.0":              8.847247,
@@ -38,7 +39,7 @@ _COST_SHARE_TABLE: Dict[str, float] = {
     "up1.conv.double_conv.3":             4.423623,
     "up3.conv.double_conv.3":             4.423623,
     # ── decoder ConvTranspose2d (rank 14-17, 3.932% each × 4 = 15.7%) ───────
-    "up1.up":                             3.932110,
+    "up1.up":                             3.932110, #not pruned de base
     "up2.up":                             3.932110,
     "up4.up":                             3.932110,
     "up3.up":                             3.932110,
@@ -229,10 +230,17 @@ class L2LayerwisePruner(Pruner):
     # ------------------------------------------------------------------
     # Cost-share weight lookup
     # ------------------------------------------------------------------
+    #def _cost_share_weight(self, layer_idx: int) -> float:
+    #    """Return the cost_share% for this layer, or 0.0 if not in the table."""
+    #    name = self.conv_names[layer_idx] if layer_idx < len(self.conv_names) else ""
+    #    return _COST_SHARE_TABLE.get(name, 0.0)
+
     def _cost_share_weight(self, layer_idx: int) -> float:
-        """Return the cost_share% for this layer, or 0.0 if not in the table."""
+        """Return the cost_share% for this layer, or 0.0 if not in the table
+        or below the minimum threshold."""
         name = self.conv_names[layer_idx] if layer_idx < len(self.conv_names) else ""
-        return _COST_SHARE_TABLE.get(name, 0.0)
+        share = _COST_SHARE_TABLE.get(name, 0.0)
+        return share if share >= _MIN_COST_SHARE_THRESHOLD else 0.0  # ← only this line added
 
     # ------------------------------------------------------------------
     # Budget distribution
