@@ -16,7 +16,7 @@ from .models.unet_flexible import UNet
 
 from .p_utils.load import get_ids, get_imgs_and_masks
 from .p_utils.utils import split_train_val, batch
-from .p_utils.deps import take_dep_snapshot, dep_pruned_counts
+#from .p_utils.deps import take_dep_snapshot, dep_pruned_counts
 
 from common.run_logging import get_logger, get_save_dir
 from common.reproducibility import seed_all
@@ -41,7 +41,7 @@ from .finetune import finetune
 from .eval_prune import eval_net
 
 from .pruners.taylor_pruning import set_model_for_taylor
-from .pruners.custom_sequential_pruning import compute_targets_from_pct
+from .pruners.custom_sequential_pruning import compute_targets_from_pct, take_dep_snapshot, dep_pruned_counts
 from .pruners.pruning_budgets import resolve_budget_and_requested
 from .pruners.friendly_budget_pruner import FriendlyBudgetPruner
 from .pruners.l2_layerwise_pruner import L2LayerwisePruner

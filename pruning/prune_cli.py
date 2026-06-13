@@ -8,10 +8,10 @@ def parse_args() -> argparse.Namespace:
 
     # Identity / paths
     p.add_argument("-n", "--name", default="final", help="run name (folder name)")
-    p.add_argument("--save_root", default="cost_profiling_based_pruning_taylor", help="root output folder")
-    p.add_argument("--data_root", default="data", help="folder containing train/ and train_masks/")
-    p.add_argument("--splitfile", default="pruning/data/trainval.json", help="train/val split json path")
-    p.add_argument("-l", "--load", default="weights/unet_carvana_scale0.5_epoch2.pth", help="checkpoint path (state_dict)")
+    p.add_argument("--save_root", default="corrected_mri_all", help="root output folder")
+    p.add_argument("--data_root", default="new_data", help="folder containing train/ and train_masks/")
+    p.add_argument("--splitfile", default="pruning/data/mri_split.json", help="train/val split json path")
+    p.add_argument("-l", "--load", default="weights/mri_checkpoint_epoch100_89.pth", help="checkpoint path (state_dict)")
     p.add_argument("-c", "--channel_txt", default="configs/model_channels_baseline.txt", help="channel txt (baseline channels)")
 
     # Device
@@ -63,13 +63,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-f", "--flops", dest="flops_reg", type=float, default=0.001, help="FLOPs regularizer weight")
 
     # Finetuning
-    p.add_argument("-r", "--lr", type=float, default=0.001, help="finetune lr")
+    p.add_argument("-r", "--lr", type=float, default=0.0015, help="finetune lr")
     p.add_argument("-i", "--iters", type=int, default=1500, help="finetune iterations")
-    p.add_argument("-e", "--epochs", type=int, default=3, help="compat: epochs, 0 uses iters only")
+    p.add_argument("-e", "--epochs", type=int, default=10, help="compat: epochs, 0 uses iters only")
 
     # Baseline eval
     p.add_argument("--eval_baseline", type=int, default=0, help="1 eval baseline, 0 skip")
-    p.add_argument("--baseline_dice", type=float, default=0.989935, help="cached baseline dice if baseline eval is skipped")
+    p.add_argument("--baseline_dice", type=float, default=0.891439, help="cached baseline dice if baseline eval is skipped")
 
     # Diagnostics
     p.add_argument("--print_flops", type=int, default=0, help="1 print per-conv FLOPs tables")
