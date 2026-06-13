@@ -1,6 +1,6 @@
-# unet_pruning — Pruning + Finetuning pipeline for Carvana U-Net
+# unet_pruning — Pruning + Finetuning layer by layer pipeline
 
-This repository contains a refactored pruning layer by layer pipeline using l2 norm criterion for a U-Net trained on the Carvana segmentation dataset.
+This repository contains a refactored pruning layer by layer pipeline using l2 norm / FPGM criterion for a U-Net trained on the Carvana segmentation dataset + Brain MRI .
 
 Primary entry point: **`prune.py`**.
 

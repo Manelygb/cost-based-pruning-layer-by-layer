@@ -25,12 +25,24 @@ def split_ids(ids: Iterable[str], n: int = 2) -> list[Tuple[str, int]]:
     return [(id_, i) for id_ in ids for i in range(n)]
 
 
-def to_cropped_imgs(ids: Iterable[Tuple[str, int]], dir_path: str, suffix: str, scale: float) -> Iterator[np.ndarray]:
-    """Yield cropped numpy images from (id,pos) tuples."""
-    for id_, pos in ids:
-        p = os.path.join(dir_path, f"{id_}{suffix}")
-        im = resize_and_crop(Image.open(p), scale=scale)
+#def to_cropped_imgs(ids: Iterable[Tuple[str, int]], dir_path: str, suffix: str, scale: float) -> Iterator[np.ndarray]:
+#    """Yield cropped numpy images from (id,pos) tuples."""
+#    for id_, pos in ids:
+#        p = os.path.join(dir_path, f"{id_}{suffix}")
+#        im = resize_and_crop(Image.open(p), scale=scale)
+#        yield get_square(im, pos)
+
+def to_cropped_imgs(ids, dir, suffix, scale):
+    """From a list of tuples, returns the correct cropped img"""
+    for id, pos in ids:
+        im = resize_and_crop(Image.open(dir + id + suffix), scale=scale)
         yield get_square(im, pos)
+
+def to_cropped_imgs(ids, dir, suffix, scale):
+    """Load and resize full images (no cropping)."""
+    for id in ids:
+        im = resize_and_crop(Image.open(dir + id + suffix), scale=scale)
+        yield im
 
 
 def get_imgs_and_masks(ids: Iterable[Tuple[str, int]], dir_img: str, dir_mask: str, scale: float):

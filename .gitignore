@@ -23,3 +23,13 @@ archive.zip
 
 *.zip
 
+temp/
+cost_profiling_based_pruning_taylor/
+cost*/
+corrected*/
+carvana*/
+temp*/
+theo*/
+*.pdf
+*.png
+
